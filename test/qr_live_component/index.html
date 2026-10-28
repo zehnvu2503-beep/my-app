@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
+               font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #box { position: relative; width: 100%; max-width: 420px; aspect-ratio: 1 / 1; margin: 0 auto;
+         box-sizing: border-box; border: 3px solid #ffffff; border-radius: 16px;
+         overflow: hidden; background: #000; transition: border-color .15s; }
+  #box.ok { border-color: #21c55e; }
+  video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #khung { position: absolute; top: 50%; left: 50%; width: 66%; aspect-ratio: 1 / 1;
+           transform: translate(-50%, -50%); border-radius: 12px;
+           box-shadow: 0 0 0 9999px rgba(0, 0, 0, .45); }
+  .c { position: absolute; width: 28px; height: 28px; border: 4px solid #ffffff; transition: border-color .15s; }
+  #box.ok .c { border-color: #21c55e; }
+  .tl { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 12px; }
+  .tr { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 12px; }
+  .bl { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 12px; }
+  .br { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 12px; }
+  #line { position: absolute; left: 6%; right: 6%; height: 2px; background: #ffffff;
+          box-shadow: 0 0 8px #ffffff; animation: quet 2.2s ease-in-out infinite alternate; }
+  #box.ok #line { background: #21c55e; box-shadow: 0 0 8px #21c55e; }
+  @keyframes quet { from { top: 8%; } to { top: 92%; } }
+  #msg { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 10px; box-sizing: border-box;
+         color: #fff; background: rgba(0, 0, 0, .65); font-size: 14px; text-align: center; }
+  #msg.err { background: rgba(185, 28, 28, .9); }
+</style>
+</head>
+<body>
+<div id="box">
+  <video id="video" playsinline muted autoplay></video>
+  <div id="khung">
+    <span class="c tl"></span><span class="c tr"></span><span class="c bl"></span><span class="c br"></span>
+    <div id="line"></div>
+  </div>
+  <div id="msg">Đang mở camera...</div>
+</div>
+<script>
+(function () {
+  var COOLDOWN = 2500;           // ms: cùng 1 mã còn trong khung hình thì không gửi lại
+  var JSQR_URL = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+
+  var box = document.getElementById("box");
+  var video = document.getElementById("video");
+  var msg = document.getElementById("msg");
+  var canvas = document.createElement("canvas");
+  var ctx = canvas.getContext("2d", { willReadFrequently: true });
+  var detector = null, lastCode = null, lastSeen = 0, busy = false, stream = null, msgTimer = null;
+
+  function send(type, extra) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: "streamlit:" + type }, extra), "*");
+  }
+  function setHeight() { send("setFrameHeight", { height: Math.ceil(box.getBoundingClientRect().height) + 2 }); }
+  function setMsg(text, isErr) { msg.textContent = text; msg.className = isErr ? "err" : ""; }
+
+  window.addEventListener("message", function (e) {
+    if (e.data && e.data.type === "streamlit:render") setHeight();
+  });
+  if (window.ResizeObserver) new ResizeObserver(setHeight).observe(box);
+  send("componentReady", { apiVersion: 1 });
+  setHeight();
+
+  function loadJsQR() {
+    return new Promise(function (resolve, reject) {
+      if (window.jsQR) return resolve();
+      var s = document.createElement("script");
+      s.src = JSQR_URL; s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  function needJsQR() {
+    loadJsQR().catch(function () { setMsg("Không tải được bộ giải mã QR. Kiểm tra kết nối mạng.", true); });
+  }
+
+  if ("BarcodeDetector" in window) {
+    try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { detector = null; }
+  }
+  if (!detector) needJsQR();
+
+  // Cắt đúng vùng vuông ở giữa khung hình (giống phần người dùng nhìn thấy) rồi giải mã
+  async function decode() {
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    var side = Math.min(vw, vh), out = Math.min(side, 720);
+    canvas.width = out; canvas.height = out;
+    ctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, out, out);
+    if (detector) {
+      try {
+        var r = await detector.detect(canvas);
+        return (r && r.length) ? r[0].rawValue : null;
+      } catch (e) { detector = null; needJsQR(); return null; }
+    }
+    if (window.jsQR) {
+      var img = ctx.getImageData(0, 0, out, out);
+      var res = window.jsQR(img.data, out, out, { inversionAttempts: "dontInvert" });
+      if (res) {
+        try {
+          if (res.binaryData && res.binaryData.length)
+            return new TextDecoder("utf-8").decode(new Uint8Array(res.binaryData));
+        } catch (e) {}
+        return res.data;
+      }
+    }
+    return null;
+  }
+
+  function handle(code) {
+    if (!code) return;
+    code = code.trim();
+    if (!code) return;
+    var now = Date.now();
+    if (code === lastCode && now - lastSeen < COOLDOWN) { lastSeen = now; return; }
+    lastCode = code; lastSeen = now;
+    box.classList.add("ok");
+    setMsg("Đã quét: " + code, false);
+    if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) {} }
+    clearTimeout(msgTimer);
+    msgTimer = setTimeout(function () { box.classList.remove("ok"); setMsg("Đưa mã QR vào khung vuông", false); }, 1500);
+    send("setComponentValue", {
+      value: { code: code, id: now + "-" + Math.random().toString(36).slice(2, 8) },
+      dataType: "json"
+    });
+  }
+
+  async function tick() {
+    if (!busy && video.readyState >= 2) {
+      busy = true;
+      try { handle(await decode()); } catch (e) {}
+      busy = false;
+    }
+    setTimeout(tick, 120);
+  }
+
+  async function startCam() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      setMsg("Đưa mã QR vào khung vuông", false);
+      tick();
+    } catch (e) {
+      setMsg("Không mở được camera (" + (e.name || e.message) + "). Hãy cho phép quyền camera và dùng HTTPS.", true);
+    }
+  }
+  window.addEventListener("pagehide", function () {
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+  });
+  startCam();
+})();
+</script>
+</body>
+</html>
